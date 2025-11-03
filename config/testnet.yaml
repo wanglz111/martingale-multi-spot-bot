@@ -8,7 +8,7 @@ exchange:
     - BTCUSDT
     - ETHUSDT
     - BNBUSDT
-  interval: 1h
+  interval: 1m
   cash_per_symbol: 5000
 
 strategy:

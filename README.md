@@ -46,6 +46,33 @@ This repository contains a modular martingale trading framework targeting Binanc
    ```
    The runner subscribes to multi-symbol klines, processes signals per bar, places testnet orders, and emits log snapshots + notifications.
 
+## Docker Usage
+
+Build the container image:
+```bash
+docker build -t martingale-bot .
+```
+
+Run a backtest (mount your historical data folder if needed):
+```bash
+docker run --rm \
+  -v "$(pwd)/data:/app/data" \
+  martingale-bot
+```
+
+Run against Binance spot testnet (make sure environment variables are set and any data/config overrides are mounted):
+```bash
+docker run --rm \
+  -e MODE=testnet \
+  -e CONFIG_FILE=config/testnet.yaml \
+  -e BINANCE_TEST_KEY=$BINANCE_TEST_KEY \
+  -e BINANCE_TEST_SECRET=$BINANCE_TEST_SECRET \
+  -e TELEGRAM_BOT_TOKEN=$TELEGRAM_BOT_TOKEN \
+  -e TELEGRAM_CHAT_ID=$TELEGRAM_CHAT_ID \
+  martingale-bot
+```
+The entrypoint selects the `MODE` (`backtest` by default or `testnet`) and uses `CONFIG_FILE` to locate the YAML configuration inside the container.
+
 ## Configuration Highlights
 
 - **Multi-symbol** support via `exchange.symbols` (each symbol uses its own portfolio instance and cash budget).
@@ -63,4 +90,3 @@ This repository contains a modular martingale trading framework targeting Binanc
 1. Replace hard-coded credentials with `${ENV_VAR}` placeholders and document required environment variables.
 2. Add unit tests covering `PortfolioManager.process_signal` and strategy edge cases.
 3. Extend `notifications/` with additional channels (e.g., email, webhook) if needed.
-
