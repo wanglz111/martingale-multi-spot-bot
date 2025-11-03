@@ -1,0 +1,34 @@
+exchange:
+  name: binance
+  mode: testnet
+  api_key: ${BINANCE_TEST_KEY}
+  api_secret: ${BINANCE_TEST_SECRET}
+  recv_window: 5000
+  symbols:
+    - BTCUSDT
+    - ETHUSDT
+    - BNBUSDT
+  interval: 1h
+  cash_per_symbol: 5000
+
+strategy:
+  module: strategies.martingale
+  class: MartingaleStrategy
+  params:
+    entry_logic: MACD
+    take_profit_percent: 5
+    martingale_trigger: 10
+    martingale_mult: 2.5
+    base_position_pct: 0.1
+    fixed_position: false
+    max_levels: 5
+
+risk:
+  max_notional: 18000
+  cooldown_minutes: 60
+
+notifications:
+  telegram:
+    enabled: true
+    bot_token: ${TELEGRAM_BOT_TOKEN}
+    chat_id: ${TELEGRAM_CHAT_ID}

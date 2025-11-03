@@ -1,0 +1,28 @@
+exchange:
+  name: backtest
+  cash: 20000
+  data_file: data/ETHUSDT_1h.csv
+  timeframe: 1h
+
+strategy:
+  module: strategies.martingale
+  class: MartingaleStrategy
+  params:
+    symbol: BTCUSDT
+    entry_logic: MACD
+    take_profit_percent: 5.0
+    martingale_trigger: 10.0
+    martingale_mult: 2.5
+    base_position_pct: 0.05
+    fixed_position: false
+    max_levels: 10
+
+risk:
+  max_notional: 20000
+  cooldown_minutes: 60
+
+notifications:
+  telegram:
+    enabled: false
+    bot_token: ""
+    chat_id: ""
