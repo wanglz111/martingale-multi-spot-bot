@@ -138,6 +138,14 @@ class MartingaleStrategy(BaseStrategy):
         self.history.append(bar)
         df = self._get_history_frame()
         if df is None:
+            logger.info(
+                "Signal warm-up | symbol=%s | interval_history=%d | high=%.2f | low=%.2f | close=%.2f",
+                self.symbol,
+                len(self.history),
+                bar.high,
+                bar.low,
+                bar.close,
+            )
             return TradeSignal(action=SignalAction.HOLD)
 
         logic = self.params["entry_logic"].upper()
