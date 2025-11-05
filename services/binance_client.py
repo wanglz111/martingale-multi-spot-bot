@@ -1,7 +1,8 @@
 from __future__ import annotations
 
+import asyncio
 from datetime import datetime
-from typing import AsyncIterator, Optional
+from typing import AsyncIterator, List, Optional
 
 from binance.async_client import AsyncClient
 from binance.client import Client
@@ -55,8 +56,22 @@ class BinanceExchange:
             raw=response,
         )
 
-    async def stream_klines(self, symbol: str, interval: str = "1h") -> AsyncIterator[BarData]:
+    async def stream_klines(
+        self,
+        symbol: str,
+        interval: str = "1h",
+        warmup_bars: int = 4,
+    ) -> AsyncIterator[BarData]:
         symbol_upper = symbol.upper()
+        last_timestamp: Optional[datetime] = None
+        if warmup_bars > 0:
+            recent_bars = await asyncio.to_thread(
+                self._fetch_recent_bars, symbol_upper, interval, warmup_bars
+            )
+            for bar in recent_bars:
+                last_timestamp = bar.timestamp
+                yield bar
+
         async_client = await self._get_async_client()
         manager = self._get_socket_manager(async_client)
         socket = manager.kline_socket(symbol.lower(), interval=interval)
@@ -68,15 +83,43 @@ class BinanceExchange:
                 data = message.get("k", {})
                 if not data or not data.get("x"):
                     continue
-                yield BarData(
+                timestamp = datetime.fromtimestamp(data["T"] / 1000)
+                if last_timestamp and timestamp <= last_timestamp:
+                    continue
+                bar = BarData(
                     symbol=symbol_upper,
-                    timestamp=datetime.fromtimestamp(data["T"] / 1000),
+                    timestamp=timestamp,
                     open=float(data["o"]),
                     high=float(data["h"]),
                     low=float(data["l"]),
                     close=float(data["c"]),
                     volume=float(data["v"]),
                 )
+                last_timestamp = bar.timestamp
+                yield bar
+
+    def _fetch_recent_bars(
+        self, symbol: str, interval: str, warmup_bars: int
+    ) -> List[BarData]:
+        klines = self.client.get_klines(
+            symbol=symbol,
+            interval=interval,
+            limit=warmup_bars,
+        )
+        bars: List[BarData] = []
+        for entry in klines:
+            bars.append(
+                BarData(
+                    symbol=symbol,
+                    timestamp=datetime.fromtimestamp(entry[6] / 1000),
+                    open=float(entry[1]),
+                    high=float(entry[2]),
+                    low=float(entry[3]),
+                    close=float(entry[4]),
+                    volume=float(entry[5]),
+                )
+            )
+        return bars
 
     async def close(self) -> None:
         self._socket_manager = None
@@ -103,6 +146,8 @@ class BinanceExchange:
         return f"{quantity:.8f}".rstrip("0").rstrip(".")
 
 
-async def run_stream(exchange: BinanceExchange, symbol: str, interval: str = "1h"):
-    async for bar in exchange.stream_klines(symbol, interval):
+async def run_stream(
+    exchange: BinanceExchange, symbol: str, interval: str = "1h", warmup_bars: int = 4
+):
+    async for bar in exchange.stream_klines(symbol, interval, warmup_bars=warmup_bars):
         yield bar

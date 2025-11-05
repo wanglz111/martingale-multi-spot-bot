@@ -35,6 +35,7 @@ async def run(config_path: str) -> None:
         symbols = [fallback_symbol]
 
     interval = exchange_cfg.get("interval", "1h")
+    warmup_bars = int(exchange_cfg.get("warmup_bars", 4))
     cash_per_symbol = exchange_cfg.get("cash_per_symbol")
     total_cash = exchange_cfg.get("cash")
 
@@ -62,7 +63,17 @@ async def run(config_path: str) -> None:
             exchange.testnet,
             initial_cash,
         )
-        tasks.append(asyncio.create_task(engine.run_live(exchange.stream_klines(symbol, interval))))
+        tasks.append(
+            asyncio.create_task(
+                engine.run_live(
+                    exchange.stream_klines(
+                        symbol,
+                        interval,
+                        warmup_bars=warmup_bars,
+                    )
+                )
+            )
+        )
 
     try:
         await asyncio.gather(*tasks)
