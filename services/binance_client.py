@@ -1,14 +1,19 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from datetime import datetime
 from typing import AsyncIterator, List, Optional
 
+import requests
 from binance.async_client import AsyncClient
 from binance.client import Client
 from binance.ws.streams import BinanceSocketManager
+from requests import RequestException
 
 from core.types import BarData, OrderRequest, OrderResult
+
+logger = logging.getLogger(__name__)
 
 
 class BinanceExchange:
@@ -106,6 +111,19 @@ class BinanceExchange:
             interval=interval,
             limit=warmup_bars,
         )
+
+        if len(klines) < warmup_bars and self.testnet:
+            fallback = self._fetch_public_klines(symbol, interval, warmup_bars)
+            if fallback:
+                logger.info(
+                    "Falling back to public klines for warm-up | symbol=%s | interval=%s | requested=%d | received=%d",
+                    symbol,
+                    interval,
+                    warmup_bars,
+                    len(fallback),
+                )
+                klines = fallback
+
         bars: List[BarData] = []
         for entry in klines:
             bars.append(
@@ -120,6 +138,27 @@ class BinanceExchange:
                 )
             )
         return bars
+
+    def _fetch_public_klines(self, symbol: str, interval: str, warmup_bars: int) -> List[List]:
+        params = {
+            "symbol": symbol.upper(),
+            "interval": interval,
+            "limit": min(max(warmup_bars, 1), 1000),
+        }
+        try:
+            response = requests.get("https://api.binance.com/api/v3/klines", params=params, timeout=5)
+            response.raise_for_status()
+            data = response.json()
+            if isinstance(data, list):
+                return data[-warmup_bars:]
+        except RequestException as exc:
+            logger.warning(
+                "Public klines fallback failed | symbol=%s | interval=%s | error=%s",
+                symbol,
+                interval,
+                exc,
+            )
+        return []
 
     async def close(self) -> None:
         self._socket_manager = None
