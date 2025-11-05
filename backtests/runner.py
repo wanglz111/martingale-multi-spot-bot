@@ -11,7 +11,7 @@ import pandas as pd
 from core.config import load_config
 from core.engine import TradingEngine
 from core.portfolio import PortfolioManager
-from core.types import BarData, OrderResult, OrderSide
+from core.types import BarData, OrderResult, OrderSide, SignalAction
 from strategies.martingale import MartingaleStrategy
 
 
@@ -57,15 +57,53 @@ def _compute_drawdown(equity: List[float]) -> float:
     return abs(max_dd)
 
 
-def _plot_equity(timestamps: List[datetime], equity: List[float], output: str) -> None:
-    if not timestamps or not equity:
+def _plot_results(
+    bars: List[BarData],
+    equity: List[float],
+    buy_events: List[dict],
+    output: str,
+) -> None:
+    if not bars or not equity:
         return
-    plt.figure(figsize=(10, 4))
-    plt.plot(timestamps, equity, label="Equity")
-    plt.legend()
+
+    timestamps = [bar.timestamp for bar in bars]
+    closes = [bar.close for bar in bars]
+
+    fig, (ax_price, ax_equity) = plt.subplots(2, 1, sharex=True, figsize=(12, 6))
+
+    ax_price.plot(timestamps, closes, label="Close Price", color="tab:blue")
+    for event in buy_events:
+        ax_price.scatter(
+            event["timestamp"],
+            event["price"],
+            marker="^",
+            color="tab:green",
+            s=60,
+            label="Buy" if event is buy_events[0] else "",
+        )
+        annotation = f"{event['price']:.2f}\n{event['reason']}"
+        ax_price.annotate(
+            annotation,
+            (event["timestamp"], event["price"]),
+            textcoords="offset points",
+            xytext=(0, 8),
+            ha="center",
+            fontsize=8,
+            color="tab:green",
+        )
+    ax_price.set_ylabel("Price")
+    ax_price.legend(loc="upper left")
+    ax_price.grid(True, linestyle="--", alpha=0.3)
+
+    ax_equity.plot(timestamps, equity, label="Equity", color="tab:orange")
+    ax_equity.set_ylabel("Equity")
+    ax_equity.legend(loc="upper left")
+    ax_equity.grid(True, linestyle="--", alpha=0.3)
+
+    fig.autofmt_xdate()
     plt.tight_layout()
     plt.savefig(output, dpi=120)
-    plt.close()
+    plt.close(fig)
 
 
 def run_backtest(config_path: str = "config/backtest.yaml") -> BacktestMetrics:
@@ -106,8 +144,8 @@ def run_backtest(config_path: str = "config/backtest.yaml") -> BacktestMetrics:
     engine = TradingEngine(strategy, portfolio, exchange)
 
     equity_curve: List[float] = []
-    timestamps: List[datetime] = []
     trades = 0
+    buy_events: List[dict] = []
 
     for bar in bars:
         pre_avg = portfolio.state.avg_price
@@ -115,16 +153,30 @@ def run_backtest(config_path: str = "config/backtest.yaml") -> BacktestMetrics:
         engine.process_bar(bar)
         snapshot = portfolio.snapshot(bar.close)
         equity_curve.append(snapshot["equity"])
-        timestamps.append(bar.timestamp)
         if pre_pos > 0 and portfolio.state.position == 0 and pre_avg > 0:
             trades += 1
+        if portfolio.state.position > pre_pos:
+            reason = "BUY"
+            signal = getattr(strategy, "last_signal", None)
+            if signal is not None and signal.info:
+                if signal.action == SignalAction.ENTER:
+                    reason = signal.info.get("reason", "ENTER")
+                elif signal.action == SignalAction.ADD:
+                    level = signal.info.get("level")
+                    reason = f"Add L{level}" if level is not None else "ADD"
+                else:
+                    reason = signal.info.get("reason", signal.action.name)
+            elif signal is not None:
+                reason = signal.action.name
+            price = exchange.last_price if exchange.last_price is not None else bar.close
+            buy_events.append({"timestamp": bar.timestamp, "price": price, "reason": reason})
 
     final_equity = equity_curve[-1] if equity_curve else initial_cash
     return_pct = (final_equity / initial_cash - 1) * 100 if initial_cash > 0 else 0.0
     max_drawdown = _compute_drawdown(equity_curve)
 
     output_path = "equity_martingale.png"
-    _plot_equity(timestamps, equity_curve, output_path)
+    _plot_results(bars, equity_curve, buy_events, output_path)
 
     print(f"Final equity: {final_equity:.2f}")
     print(f"Return: {return_pct:.2f}%")
@@ -134,7 +186,7 @@ def run_backtest(config_path: str = "config/backtest.yaml") -> BacktestMetrics:
 
     return BacktestMetrics(
         equity_curve=equity_curve,
-        timestamps=timestamps,
+        timestamps=[bar.timestamp for bar in bars],
         trades=trades,
         final_equity=final_equity,
         return_pct=return_pct,
