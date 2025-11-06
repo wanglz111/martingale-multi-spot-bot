@@ -62,9 +62,11 @@ This repository contains a modular martingale trading framework targeting Binanc
    ```bash
    python run_backtest.py -c config/backtest.yaml
    ```
-   This outputs summary metrics and saves `equity_martingale.png`.
+   This outputs summary metrics and saves equity curve snapshots for different lookback windows.
 
-   ![Backtest equity curve](equity_martingale.png)
+   ![Backtest equity curve (1 year)](equity_martingale.png)
+   ![Backtest equity curve (3 years)](equity_martingale_3years.png)
+   ![Backtest equity curve (6 years)](equity_martingale_6years.png)
 
 4. **Configure testnet credentials**  
    Export your Binance spot testnet keys (recommended) or edit `config/testnet.yaml`:
