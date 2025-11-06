@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timedelta
+from decimal import Decimal, ROUND_DOWN
 from typing import Dict, List, Optional
 
 from core.types import OrderRequest, OrderResult, OrderSide, SignalAction, TradeSignal
@@ -28,6 +29,7 @@ class PortfolioManager:
         self.state = PortfolioState(cash=initial_cash)
         self.risk = risk_params or {}
         self.qty_precision = self.params.get("quantity_precision", 6)
+        self.min_qty = 10 ** (-self.qty_precision) if self.qty_precision >= 0 else 0.0
 
     def _cooldown_ok(self, timestamp: datetime) -> bool:
         cooldown = self.risk.get("cooldown_minutes", 0)
@@ -42,8 +44,12 @@ class PortfolioManager:
         return float(value) if value else 0.0
 
     def _round_qty(self, qty: float) -> float:
-        factor = 10 ** self.qty_precision
-        return int(qty * factor) / factor
+        if qty <= 0:
+            return 0.0
+        if self.qty_precision <= 0:
+            return float(int(qty))
+        quant = Decimal("1") / (Decimal("10") ** self.qty_precision)
+        return float(Decimal(str(qty)).quantize(quant, rounding=ROUND_DOWN))
 
     def _calc_entry_qty(self, price: float) -> float:
         if self.params.get("fixed_position", False):
@@ -76,8 +82,10 @@ class PortfolioManager:
         if action == SignalAction.ENTER and self.state.position == 0:
             if not self._cooldown_ok(timestamp):
                 return orders
-            qty = self._calc_entry_qty(price)
-            qty = self._round_qty(qty)
+            raw_qty = self._calc_entry_qty(price)
+            qty = self._round_qty(raw_qty)
+            if qty <= 0 and raw_qty > 0:
+                qty = raw_qty
             if qty <= 0 or self._would_exceed_notional(price, qty):
                 return orders
             orders.append(OrderRequest(symbol=self.symbol, side=OrderSide.BUY, quantity=qty))
@@ -85,13 +93,18 @@ class PortfolioManager:
             next_level = self.state.levels + 1
             if next_level > int(self.params.get("max_levels", 1)):
                 return orders
-            qty = self._calc_add_qty(next_level)
-            qty = self._round_qty(qty)
+            raw_qty = self._calc_add_qty(next_level)
+            qty = self._round_qty(raw_qty)
+            if qty <= 0 and raw_qty > 0:
+                qty = raw_qty
             if qty <= 0 or self._would_exceed_notional(price, qty):
                 return orders
             orders.append(OrderRequest(symbol=self.symbol, side=OrderSide.BUY, quantity=qty))
         elif action == SignalAction.EXIT and self.state.position > 0:
             qty = self._round_qty(self.state.position)
+            remainder = self.state.position - qty
+            if (qty <= 0 or 0 < remainder < self.min_qty) and self.state.position > 0:
+                qty = self.state.position
             if qty > 0:
                 orders.append(OrderRequest(symbol=self.symbol, side=OrderSide.SELL, quantity=qty))
 
@@ -121,6 +134,12 @@ class PortfolioManager:
             self.state.position = max(new_position, 0.0)
             if self.state.position <= 1e-10:
                 self.state.position = 0.0
+            elif 0 < self.state.position < self.min_qty:
+                extra_qty = self.state.position
+                self.state.cash += execution_price * extra_qty
+                order.filled_qty += extra_qty
+                self.state.position = 0.0
+            if self.state.position == 0.0:
                 self.state.avg_price = 0.0
                 self.state.base_unit = 0.0
                 self.state.levels = 0
