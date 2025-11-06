@@ -8,6 +8,31 @@ This repository contains a modular martingale trading framework targeting Binanc
 
 > **Security notice:** `config/testnet.yaml` currently holds plain-text API credentials. Replace them with environment-variable references (e.g. `${BINANCE_TEST_KEY}`) before committing or sharing the repository.
 
+## Overview / 项目简介
+
+**English:** Multi-symbol martingale trading bot for Binance spot markets with pluggable signals, backtesting support, and testnet execution workflows.  
+**中文：** 面向 Binance 现货市场的多标的马丁格尔交易框架，提供可插拔信号模块、回测工具以及测试网执行流程。
+
+### Strategy Source / 策略来源
+
+**English:** Inspired by the TradingView script [inwCoin Martingale Strategy for Bitcoin](https://www.tradingview.com/script/8OS1nbr8-inwCoin-Martingale-Strategy-for-Bitcoin/) and reimplemented in Python with multi-symbol support and customizable risk controls.  
+**中文：** 策略灵感来自 TradingView 上的 [inwCoin Martingale Strategy for Bitcoin](https://www.tradingview.com/script/8OS1nbr8-inwCoin-Martingale-Strategy-for-Bitcoin/)，在此项目中以 Python 重新实现，扩展为多交易对并强化风险控制配置。
+
+## Strategy Insights / 策略思路
+
+**English:** The engine enters with a base position when indicator conditions align, then applies martingale-style scaling on drawdowns until reaching configured levels, while seeking to exit on predefined profit targets. Portfolio limits and cooldowns help cap total exposure per symbol.  
+**中文：** 核心逻辑是在指标触发时建立初始仓位，价格回撤时按配置进行马丁格尔加仓，直至达到最大层数，并以固定收益目标止盈。同时结合资金上限与冷却时间限制，控制单品种的整体风险敞口。
+
+## Indicators / 指标细节
+
+**English:** Entry logic can switch between MACD crossovers, Stochastic RSI recoveries, or an ATR-based trailing stop regime. Supporting utilities compute RSI, ATR, and MACD in pandas to mirror the TradingView setup.  
+**中文：** 入场条件可在 MACD 金叉、Stochastic RSI 低位反弹以及基于 ATR 的趋势追踪之间切换，并通过 pandas 计算 RSI、ATR、MACD 等指标，以还原 TradingView 脚本中的信号设置。
+
+## Risk Considerations / 风险提示
+
+**English:** Martingale pyramiding magnifies position size during drawdowns, so budget sizing, max levels, and exchange liquidity need careful tuning. Always validate on historical data and sandbox/testnet environments before risking capital. Investing involves risk; this repository shares technical implementation guidance only.  
+**中文：** 马丁格尔加仓会在下跌过程中迅速扩大持仓，务必谨慎设定资金规模、最大层数与交易所流动性约束。建议先在历史数据与测试网环境充分验证后再考虑实盘。投资有风险，仅分享技术。
+
 ## Project Structure
 
 - `config/` – Environment-specific YAML configs (`backtest.yaml`, `testnet.yaml`).
@@ -32,6 +57,8 @@ This repository contains a modular martingale trading framework targeting Binanc
    python run_backtest.py -c config/backtest.yaml
    ```
    This outputs summary metrics and saves `equity_martingale.png`.
+
+   ![Backtest equity curve](equity_martingale.png)
 
 4. **Configure testnet credentials**  
    Export your Binance spot testnet keys (recommended) or edit `config/testnet.yaml`:

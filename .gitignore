@@ -2,7 +2,6 @@ __pycache__/
 *.pyc
 *.pyo
 *.pyd
-equity_martingale.png
 .DS_Store
 *.log
 .env
