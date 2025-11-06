@@ -350,19 +350,6 @@ def run_backtest(config_path: str = "config/backtest.yaml") -> BacktestMetrics:
         with pd.option_context("display.max_columns", None, "display.width", None):
             print(summary_df.to_string(index=False))
 
-    if trade_rows:
-        table_data = pd.DataFrame(
-            {
-                "Signal Time": [_fmt_time(row["signal_time"]) for row in trade_rows],
-                "Add Time": [_fmt_time(row["add_time"]) for row in trade_rows],
-                "Add #": [row["add_number"] for row in trade_rows],
-                "Investment": [_fmt_money(row["investment"]) for row in trade_rows],
-                "Close Time": [_fmt_time(row["close_time"]) for row in trade_rows],
-                "Profit": [_fmt_profit(row["profit"]) for row in trade_rows],
-            }
-        )
-        print("\nTrade Breakdown:")
-        print(table_data.to_string(index=False))
 
     return BacktestMetrics(
         equity_curve=equity_curve,

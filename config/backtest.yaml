@@ -11,14 +11,14 @@ strategy:
     symbol: BTCUSDT
     entry_logic: MACD
     take_profit_percent: 5.0
-    martingale_trigger: 7.0
-    martingale_mult: 2.1
+    martingale_trigger: 10.0
+    martingale_mult: 2.45
     base_position_pct: 0.05
     fixed_position: false
     max_levels: 10
 
 risk:
-  max_notional: 2000
+  max_notional: 4000
   cooldown_minutes: 60
 
 notifications:
