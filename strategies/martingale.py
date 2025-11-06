@@ -57,6 +57,39 @@ class MartingaleStrategy(BaseStrategy):
         }
         return pd.DataFrame(data)
 
+    @staticmethod
+    def _rma(series: pd.Series, length: int) -> pd.Series:
+        return series.ewm(alpha=1 / length, adjust=False).mean()
+
+    @staticmethod
+    def _rsi(series: pd.Series, length: int) -> pd.Series:
+        delta = series.diff()
+        gain = delta.clip(lower=0)
+        loss = -delta.clip(upper=0)
+        avg_gain = MartingaleStrategy._rma(gain, length)
+        avg_loss = MartingaleStrategy._rma(loss, length)
+        rs = avg_gain / avg_loss.replace(0, pd.NA)
+        rsi = 100 - (100 / (1 + rs))
+        return rsi
+
+    @staticmethod
+    def _atr(df: pd.DataFrame, period: int) -> pd.Series:
+        high = df["high"]
+        low = df["low"]
+        close = df["close"]
+        prev_close = close.shift(1)
+        tr_components = pd.concat(
+            [
+                high - low,
+                (high - prev_close).abs(),
+                (low - prev_close).abs(),
+            ],
+            axis=1,
+        )
+        true_range = tr_components.max(axis=1)
+        atr = MartingaleStrategy._rma(true_range, period)
+        return atr
+
     def _macd_signal(self, df: pd.DataFrame) -> Tuple[bool, Dict[str, float]]:
         closes = df["close"]
         ema_fast = closes.ewm(span=12, adjust=False).mean()
@@ -75,44 +108,114 @@ class MartingaleStrategy(BaseStrategy):
         return decision, metrics
 
     def _stoch_rsi_signal(self, df: pd.DataFrame) -> Tuple[bool, Dict[str, float]]:
-        closes = df["close"]
-        delta = closes.diff()
-        gain = delta.clip(lower=0)
-        loss = -delta.clip(upper=0)
-        period = 14
-        avg_gain = gain.rolling(window=period).mean()
-        avg_loss = loss.rolling(window=period).mean()
-        rs = avg_gain / avg_loss.replace(0, pd.NA)
-        rsi = 100 - (100 / (1 + rs))
-        stoch_rsi = (rsi - rsi.rolling(window=period).min()) / (rsi.rolling(window=period).max() - rsi.rolling(window=period).min())
-        stoch_rsi = stoch_rsi * 100
-        stoch_signal = stoch_rsi.rolling(window=3).mean()
-        if len(stoch_signal) < 2:
+        closes = df["close"].reset_index(drop=True)
+        rsi = self._rsi(closes, 14)
+        lowest = rsi.rolling(window=14).min()
+        highest = rsi.rolling(window=14).max()
+        denom = highest - lowest
+        stoch = (rsi - lowest) / denom.replace(0, pd.NA)
+        k = stoch.rolling(window=3).mean() * 100
+        d = k.rolling(window=3).mean()
+        if len(k) < 2 or len(d) < 2:
             return False, {}
-        current = stoch_rsi.iloc[-1]
-        prev_signal = stoch_signal.iloc[-2]
-        if pd.isna(current) or pd.isna(prev_signal):
+        current_k = k.iloc[-1]
+        prev_d = d.iloc[-2]
+        current_d = d.iloc[-1]
+        if pd.isna(current_k) or pd.isna(prev_d) or pd.isna(current_d):
             return False, {}
-        decision = current > 20 and prev_signal <= 20
+        decision = bool(current_k > 20 and prev_d <= 20 and current_d > 20)
         metrics = {
-            "stoch_rsi": float(current),
-            "signal": float(stoch_signal.iloc[-1]),
-            "prev_signal": float(prev_signal),
+            "k": float(current_k),
+            "d": float(current_d),
+            "prev_d": float(prev_d),
         }
         return decision, metrics
 
     def _atr_trend_signal(self, df: pd.DataFrame) -> Tuple[bool, Dict[str, float]]:
-        closes = df["close"]
-        ema_fast = closes.ewm(span=10, adjust=False).mean()
-        ema_slow = closes.ewm(span=30, adjust=False).mean()
-        if len(ema_fast) < 2:
+        closes = df["close"].reset_index(drop=True)
+        atr1 = self._atr(df, 5).reset_index(drop=True).fillna(0)
+        atr2 = self._atr(df, 10).reset_index(drop=True).fillna(0)
+        sl1 = 0.5 * atr1
+        sl2 = 2.3 * atr2
+        sl3 = 0.275 * 2.3 * atr2
+
+        trail1_vals = []
+        trail2_vals = []
+        trail3_vals = []
+        for idx, price in enumerate(closes):
+            prev_price = closes.iloc[idx - 1] if idx > 0 else price
+
+            prev_trail1 = trail1_vals[-1] if trail1_vals else 0.0
+            prev_trail2 = trail2_vals[-1] if trail2_vals else 0.0
+            prev_trail3 = trail3_vals[-1] if trail3_vals else 0.0
+
+            sl1_val = float(sl1.iloc[idx]) if not pd.isna(sl1.iloc[idx]) else 0.0
+            sl2_val = float(sl2.iloc[idx]) if not pd.isna(sl2.iloc[idx]) else 0.0
+            sl3_val = float(sl3.iloc[idx]) if not pd.isna(sl3.iloc[idx]) else 0.0
+
+            if price > prev_trail1 and prev_price > prev_trail1:
+                trail1 = max(prev_trail1, price - sl1_val)
+            elif price < prev_trail1 and prev_price < prev_trail1:
+                trail1 = min(prev_trail1, price + sl1_val)
+            elif price > prev_trail1:
+                trail1 = price - sl1_val
+            else:
+                trail1 = price + sl1_val
+            trail1_vals.append(trail1)
+
+            if price > prev_trail2 and prev_price > prev_trail2:
+                trail2 = max(prev_trail2, price - sl2_val)
+            elif price < prev_trail2 and prev_price < prev_trail2:
+                trail2 = min(prev_trail2, price + sl2_val)
+            elif price > prev_trail2:
+                trail2 = price - sl2_val
+            else:
+                trail2 = price + sl2_val
+            trail2_vals.append(trail2)
+
+            if price > prev_trail2 and prev_price > prev_trail2:
+                trail3 = max(prev_trail3, price + sl3_val)
+            elif price < prev_trail2 and prev_price < prev_trail2:
+                trail3 = min(prev_trail3, price - sl3_val)
+            elif price > prev_trail2:
+                trail3 = price + sl3_val
+            else:
+                trail3 = price + sl3_val
+            trail3_vals.append(trail3)
+
+        hst = pd.Series(trail1_vals) - pd.Series(trail2_vals)
+        sig = hst.ewm(span=9, adjust=False).mean()
+
+        atr_blue = (hst < 0) & (hst > sig)
+        atr_green = (hst > 0) & (hst > sig)
+        atr_red = (hst < 0) & (hst < sig)
+
+        def bars_since(series: pd.Series) -> pd.Series:
+            counts = []
+            last = float("inf")
+            for value in series:
+                if bool(value):
+                    last = 0
+                else:
+                    last = last + 1 if last != float("inf") else float("inf")
+                counts.append(last)
+            return pd.Series(counts)
+
+        bars_since_green = bars_since(atr_green)
+        bars_since_red = bars_since(atr_red)
+        atr_bear = bars_since_red < bars_since_green
+        atr_buy_series = atr_green & atr_bear.shift(1).fillna(False)
+
+        if atr_buy_series.empty:
             return False, {}
-        decision = bool(ema_fast.iloc[-1] > ema_slow.iloc[-1] and ema_fast.iloc[-2] <= ema_slow.iloc[-2])
+
+        decision = bool(atr_buy_series.iloc[-1])
         metrics = {
-            "ema_fast": float(ema_fast.iloc[-1]),
-            "ema_slow": float(ema_slow.iloc[-1]),
-            "prev_fast": float(ema_fast.iloc[-2]),
-            "prev_slow": float(ema_slow.iloc[-2]),
+            "hst": float(hst.iloc[-1]),
+            "sig": float(sig.iloc[-1]),
+            "trail1": float(trail1_vals[-1]),
+            "trail2": float(trail2_vals[-1]),
+            "trail3": float(trail3_vals[-1]),
         }
         return decision, metrics
 
