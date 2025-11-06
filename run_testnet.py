@@ -20,11 +20,14 @@ async def run(config_path: str) -> None:
     risk_cfg = cfg.get("risk", {})
     notifications_cfg = cfg.get("notifications", {})
 
+    data_source = exchange_cfg.get("data_source", "binance")
     exchange = BinanceExchange(
         api_key=exchange_cfg["api_key"],
         api_secret=exchange_cfg["api_secret"],
         testnet=exchange_cfg.get("mode", "").lower() == "testnet",
         recv_window=int(exchange_cfg.get("recv_window", 5000)),
+        data_source=data_source,
+        ccxt_options=exchange_cfg.get("ccxt", {}),
     )
     notifier = build_notifier(notifications_cfg)
     symbols = exchange_cfg.get("symbols")
@@ -35,9 +38,14 @@ async def run(config_path: str) -> None:
         symbols = [fallback_symbol]
 
     interval = exchange_cfg.get("interval", "1h")
-    warmup_bars = int(exchange_cfg.get("warmup_bars", 4))
     cash_per_symbol = exchange_cfg.get("cash_per_symbol")
     total_cash = exchange_cfg.get("cash")
+
+    try:
+        await asyncio.to_thread(exchange.verify_account_permissions)
+    except Exception:
+        logger.exception("Exchange credentials validation failed.")
+        raise
 
     tasks = []
 
@@ -45,6 +53,12 @@ async def run(config_path: str) -> None:
         params = deepcopy(strategy_cfg["params"])
         params["symbol"] = symbol
         strategy = MartingaleStrategy(**params)
+
+        try:
+            await asyncio.to_thread(exchange.ensure_symbol_tradable, symbol)
+        except Exception:
+            logger.exception("Symbol validation failed | symbol=%s", symbol)
+            raise
 
         if cash_per_symbol is not None:
             initial_cash = float(cash_per_symbol)
@@ -69,7 +83,6 @@ async def run(config_path: str) -> None:
                     exchange.stream_klines(
                         symbol,
                         interval,
-                        warmup_bars=warmup_bars,
                     )
                 )
             )

@@ -3,15 +3,15 @@ from __future__ import annotations
 import asyncio
 import logging
 from datetime import datetime
-from typing import AsyncIterator, List, Optional
-
-import requests
+from pathlib import Path
+from typing import AsyncIterator, Dict, Optional, Tuple
 from binance.async_client import AsyncClient
 from binance.client import Client
+from binance.exceptions import BinanceAPIException
 from binance.ws.streams import BinanceSocketManager
-from requests import RequestException
 
 from core.types import BarData, OrderRequest, OrderResult
+from services.ccxt_data import CCXTKlineDatabase, CCXTOptions
 
 logger = logging.getLogger(__name__)
 
@@ -23,6 +23,8 @@ class BinanceExchange:
         api_secret: str,
         testnet: bool = False,
         recv_window: int = 5000,
+        data_source: str = "binance",
+        ccxt_options: Optional[dict] = None,
     ):
         self.client = Client(api_key=api_key, api_secret=api_secret, testnet=testnet)
         self.api_key = api_key
@@ -31,6 +33,9 @@ class BinanceExchange:
         self.recv_window = recv_window
         self._async_client: Optional[AsyncClient] = None
         self._socket_manager: Optional[BinanceSocketManager] = None
+        self.data_source = data_source.lower()
+        self._ccxt_feeds: Dict[Tuple[str, str], CCXTKlineDatabase] = {}
+        self._ccxt_options = self._build_ccxt_options(ccxt_options or {})
         if self.testnet:
             self.client.API_URL = "https://testnet.binance.vision/api"
 
@@ -42,7 +47,14 @@ class BinanceExchange:
             "quantity": self._format_quantity(request.quantity),
             "recvWindow": self.recv_window,
         }
-        response = self.client.create_order(**params)
+        try:
+            response = self.client.create_order(**params)
+        except BinanceAPIException as exc:
+            if exc.code == -2015:
+                raise PermissionError(
+                    "Binance rejected the order due to invalid API key, IP restriction, or missing trade permissions."
+                ) from exc
+            raise RuntimeError(f"Binance rejected the order: {exc.message}") from exc
         fills = response.get("fills", [])
         if fills:
             total_qty = sum(float(fill["qty"]) for fill in fills)
@@ -65,17 +77,15 @@ class BinanceExchange:
         self,
         symbol: str,
         interval: str = "1h",
-        warmup_bars: int = 4,
     ) -> AsyncIterator[BarData]:
         symbol_upper = symbol.upper()
-        last_timestamp: Optional[datetime] = None
-        if warmup_bars > 0:
-            recent_bars = await asyncio.to_thread(
-                self._fetch_recent_bars, symbol_upper, interval, warmup_bars
-            )
-            for bar in recent_bars:
-                last_timestamp = bar.timestamp
+        if self.data_source == "ccxt":
+            feed = self._get_ccxt_feed(symbol_upper, interval)
+            async for bar in feed.stream():
                 yield bar
+            return
+
+        last_timestamp: Optional[datetime] = None
 
         async_client = await self._get_async_client()
         manager = self._get_socket_manager(async_client)
@@ -103,68 +113,57 @@ class BinanceExchange:
                 last_timestamp = bar.timestamp
                 yield bar
 
-    def _fetch_recent_bars(
-        self, symbol: str, interval: str, warmup_bars: int
-    ) -> List[BarData]:
-        klines = self.client.get_klines(
-            symbol=symbol,
-            interval=interval,
-            limit=warmup_bars,
-        )
-
-        if len(klines) < warmup_bars and self.testnet:
-            fallback = self._fetch_public_klines(symbol, interval, warmup_bars)
-            if fallback:
-                logger.info(
-                    "Falling back to public klines for warm-up | symbol=%s | interval=%s | requested=%d | received=%d",
-                    symbol,
-                    interval,
-                    warmup_bars,
-                    len(fallback),
-                )
-                klines = fallback
-
-        bars: List[BarData] = []
-        for entry in klines:
-            bars.append(
-                BarData(
-                    symbol=symbol,
-                    timestamp=datetime.fromtimestamp(entry[6] / 1000),
-                    open=float(entry[1]),
-                    high=float(entry[2]),
-                    low=float(entry[3]),
-                    close=float(entry[4]),
-                    volume=float(entry[5]),
-                )
-            )
-        return bars
-
-    def _fetch_public_klines(self, symbol: str, interval: str, warmup_bars: int) -> List[List]:
-        params = {
-            "symbol": symbol.upper(),
-            "interval": interval,
-            "limit": min(max(warmup_bars, 1), 1000),
-        }
+    def verify_account_permissions(self) -> None:
         try:
-            response = requests.get("https://api.binance.com/api/v3/klines", params=params, timeout=5)
-            response.raise_for_status()
-            data = response.json()
-            if isinstance(data, list):
-                return data[-warmup_bars:]
-        except RequestException as exc:
-            logger.warning(
-                "Public klines fallback failed | symbol=%s | interval=%s | error=%s",
-                symbol,
-                interval,
-                exc,
+            account = self.client.get_account(recvWindow=self.recv_window)
+        except BinanceAPIException as exc:
+            if exc.code == -2015:
+                raise PermissionError(
+                    "Unable to verify Binance account permissions: invalid API key, IP restrictions, or missing trade rights."
+                ) from exc
+            raise RuntimeError(f"Unable to verify Binance account permissions: {exc.message}") from exc
+
+        if not account.get("canTrade", True):
+            raise PermissionError("The configured Binance account is not permitted to trade.")
+
+        permissions = set(account.get("permissions", []))
+        if permissions and "SPOT" not in permissions:
+            raise PermissionError(
+                "The configured Binance API key lacks SPOT trading permission. Enable 'Enable Spot & Margin Trading'."
             )
-        return []
+
+        logger.info("Binance API key verified successfully. Trading permissions confirmed.")
+
+    def ensure_symbol_tradable(self, symbol: str) -> None:
+        info = self.client.get_symbol_info(symbol.upper())
+        if not info:
+            raise ValueError(f"Symbol {symbol} is not available on Binance.")
+        status = info.get("status")
+        if status != "TRADING":
+            raise PermissionError(f"Symbol {symbol} is not tradable on Binance (status={status}).")
+
+    def _get_ccxt_feed(self, symbol: str, interval: str) -> CCXTKlineDatabase:
+        key = (symbol, interval)
+        if key not in self._ccxt_feeds:
+            options = CCXTOptions(
+                exchange_id=self._ccxt_options.exchange_id,
+                limit=self._ccxt_options.limit,
+                storage_dir=self._ccxt_options.storage_dir,
+                poll_interval=self._ccxt_options.poll_interval,
+                enable_rate_limit=self._ccxt_options.enable_rate_limit,
+            )
+            self._ccxt_feeds[key] = CCXTKlineDatabase(symbol, interval, options)
+        return self._ccxt_feeds[key]
 
     async def close(self) -> None:
         self._socket_manager = None
         if self._async_client:
             await self._async_client.close_connection()
             self._async_client = None
+        if self._ccxt_feeds:
+            for feed in self._ccxt_feeds.values():
+                await feed.close()
+            self._ccxt_feeds.clear()
 
     async def _get_async_client(self) -> AsyncClient:
         if self._async_client is None:
@@ -184,9 +183,25 @@ class BinanceExchange:
     def _format_quantity(quantity: float) -> str:
         return f"{quantity:.8f}".rstrip("0").rstrip(".")
 
+    @staticmethod
+    def _build_ccxt_options(raw: dict) -> CCXTOptions:
+        options = CCXTOptions()
+        if "exchange" in raw:
+            options.exchange_id = str(raw["exchange"]).lower()
+        if "limit" in raw:
+            options.limit = max(int(raw["limit"]), 1)
+        if "storage_dir" in raw:
+            options.storage_dir = Path(raw["storage_dir"])
+        if "poll_interval" in raw:
+            try:
+                options.poll_interval = float(raw["poll_interval"])
+            except (TypeError, ValueError):
+                options.poll_interval = None
+        if "enable_rate_limit" in raw:
+            options.enable_rate_limit = bool(raw["enable_rate_limit"])
+        return options
 
-async def run_stream(
-    exchange: BinanceExchange, symbol: str, interval: str = "1h", warmup_bars: int = 4
-):
-    async for bar in exchange.stream_klines(symbol, interval, warmup_bars=warmup_bars):
+
+async def run_stream(exchange: BinanceExchange, symbol: str, interval: str = "1h"):
+    async for bar in exchange.stream_klines(symbol, interval):
         yield bar
