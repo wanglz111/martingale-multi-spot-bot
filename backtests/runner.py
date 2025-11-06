@@ -25,6 +25,7 @@ class BacktestMetrics:
     max_drawdown: float
     adds_per_trade: List[int]
     trade_rows: List[dict]
+    trade_summaries: List[dict]
 
 
 class BacktestExchange:
@@ -155,6 +156,7 @@ def run_backtest(config_path: str = "config/backtest.yaml") -> BacktestMetrics:
     current_adds = 0
     current_trade: dict | None = None
     trade_rows: List[dict] = []
+    trade_summaries: List[dict] = []
 
     for bar in bars:
         pre_avg = portfolio.state.avg_price
@@ -229,6 +231,24 @@ def run_backtest(config_path: str = "config/backtest.yaml") -> BacktestMetrics:
                         "profit": profit_value,
                     }
                 )
+            levels = len(current_trade["entries"])
+            adds_count = max(levels - 1, 0)
+            total_cost = current_trade["total_cost"]
+            total_proceeds = current_trade["total_proceeds"]
+            profit_pct = (profit_value / total_cost * 100) if total_cost else None
+            trade_summaries.append(
+                {
+                    "Entry Time": signal_time,
+                    "Exit Time": close_time,
+                    "Levels": levels,
+                    "Adds": adds_count,
+                    "Invested": total_cost,
+                    "Proceeds": total_proceeds,
+                    "Profit": profit_value,
+                    "Return %": profit_pct,
+                    "Duration": (close_time - signal_time) if signal_time and close_time else None,
+                }
+            )
             current_trade = None
 
     final_equity = equity_curve[-1] if equity_curve else initial_cash
@@ -261,19 +281,84 @@ def run_backtest(config_path: str = "config/backtest.yaml") -> BacktestMetrics:
                     "profit": current_trade.get("final_profit"),
                 }
             )
+        levels = len(current_trade["entries"])
+        adds_count = max(levels - 1, 0)
+        total_cost = current_trade["total_cost"]
+        total_proceeds = current_trade["total_proceeds"]
+        profit_value = current_trade.get("final_profit")
+        profit_pct = (profit_value / total_cost * 100) if profit_value is not None and total_cost else None
+        exit_time = current_trade.get("final_close_time")
+        trade_summaries.append(
+            {
+                "Entry Time": signal_time,
+                "Exit Time": exit_time,
+                "Levels": levels,
+                "Adds": adds_count,
+                "Invested": total_cost,
+                "Proceeds": total_proceeds if total_proceeds else None,
+                "Profit": profit_value,
+                "Return %": profit_pct,
+                "Duration": (exit_time - signal_time) if signal_time and exit_time else None,
+            }
+        )
+
+    def _fmt_time(ts: datetime | None) -> str:
+        return ts.strftime("%Y-%m-%d %H:%M:%S") if ts else ""
+
+    def _fmt_profit(value: float | None) -> str:
+        if value is None:
+            return ""
+        return f"{value:.2f}"
+
+    def _fmt_pct(value: float | None) -> str:
+        if value is None:
+            return ""
+        return f"{value:.2f}%"
+
+    def _fmt_money(value: float | None) -> str:
+        if value is None:
+            return ""
+        return f"{value:.2f}"
+
+    def _fmt_duration(value) -> str:
+        if value is None:
+            return ""
+        total_seconds = int(value.total_seconds())
+        hours, remainder = divmod(total_seconds, 3600)
+        minutes, seconds = divmod(remainder, 60)
+        if hours > 0:
+            return f"{hours}h {minutes}m"
+        if minutes > 0:
+            return f"{minutes}m {seconds}s"
+        return f"{seconds}s"
+
+    if trade_summaries:
+        summary_df = pd.DataFrame(
+            {
+                "Entry Time": [_fmt_time(row["Entry Time"]) for row in trade_summaries],
+                "Exit Time": [_fmt_time(row["Exit Time"]) for row in trade_summaries],
+                "Levels": [row["Levels"] for row in trade_summaries],
+                "Adds": [row["Adds"] for row in trade_summaries],
+                "Invested": [_fmt_money(row["Invested"]) for row in trade_summaries],
+                "Proceeds": [_fmt_money(row["Proceeds"]) for row in trade_summaries],
+                "Profit": [_fmt_profit(row["Profit"]) for row in trade_summaries],
+                "Return": [_fmt_pct(row["Return %"]) for row in trade_summaries],
+                "Duration": [_fmt_duration(row["Duration"]) for row in trade_summaries],
+            }
+        )
+        print("\nTrade Summary:")
+        with pd.option_context("display.max_columns", None, "display.width", None):
+            print(summary_df.to_string(index=False))
 
     if trade_rows:
-        def _fmt_time(ts: datetime | None) -> str:
-            return ts.strftime("%Y-%m-%d %H:%M:%S") if ts else ""
-
         table_data = pd.DataFrame(
             {
                 "Signal Time": [_fmt_time(row["signal_time"]) for row in trade_rows],
                 "Add Time": [_fmt_time(row["add_time"]) for row in trade_rows],
                 "Add #": [row["add_number"] for row in trade_rows],
-                "Investment": [row["investment"] for row in trade_rows],
+                "Investment": [_fmt_money(row["investment"]) for row in trade_rows],
                 "Close Time": [_fmt_time(row["close_time"]) for row in trade_rows],
-                "Profit": [row["profit"] if row["profit"] is not None else "" for row in trade_rows],
+                "Profit": [_fmt_profit(row["profit"]) for row in trade_rows],
             }
         )
         print("\nTrade Breakdown:")
@@ -288,6 +373,7 @@ def run_backtest(config_path: str = "config/backtest.yaml") -> BacktestMetrics:
         max_drawdown=max_drawdown,
         adds_per_trade=adds_per_trade,
         trade_rows=trade_rows,
+        trade_summaries=trade_summaries,
     )
 
 
