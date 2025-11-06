@@ -23,6 +23,12 @@ This repository contains a modular martingale trading framework targeting Binanc
 **English:** The engine enters with a base position when indicator conditions align, then applies martingale-style scaling on drawdowns until reaching configured levels, while seeking to exit on predefined profit targets. Portfolio limits and cooldowns help cap total exposure per symbol.  
 **中文：** 核心逻辑是在指标触发时建立初始仓位，价格回撤时按配置进行马丁格尔加仓，直至达到最大层数，并以固定收益目标止盈。同时结合资金上限与冷却时间限制，控制单品种的整体风险敞口。
 
+## Dynamic Take-Profit Decay / 动态止盈机制
+
+**English:** The martingale strategy now supports a time-aware profit target "TP(Δt) = max(tp_min, tp0 · e^{−Δt/τ})" that gradually lowers the required gain as a position ages. The parameters `take_profit_percent` (`tp0`), `take_profit_min_percent` (`tp_min`), and `take_profit_decay_hours` (`τ`) control the initial threshold, the floor, and the decay pace in hours. The entry timestamp is captured on every fill (weighted when layering in), so backtests and the Binance testnet runner evaluate the same decaying target on each bar. This smooth decay helps release capital during extended ranges without sacrificing early-trade upside.
+
+**中文：** 马丁格尔策略新增基于持仓时间的动态止盈函数 "TP(Δt) = max(tp_min, tp0 · e^{−Δt/τ})"。通过 `take_profit_percent`（初始阈值 `tp0`）、`take_profit_min_percent`（止盈底线 `tp_min`）以及 `take_profit_decay_hours`（指数衰减时间常数 `τ`，单位：小时）即可调节衰减曲线。策略在每次买入时记录入场时间（多次加仓按权重更新），因此无论在回测还是 Binance 测试网环境中，都会基于同一时间衰减逻辑评估止盈条件，从而在长时间横盘阶段加速退出，同时保留初始行情中的盈利空间。
+
 ## Indicators / 指标细节
 
 **English:** Entry logic can switch between MACD crossovers, Stochastic RSI recoveries, or an ATR-based trailing stop regime. Supporting utilities compute RSI, ATR, and MACD in pandas to mirror the TradingView setup.  
