@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from datetime import datetime
+from decimal import Decimal, ROUND_DOWN, ROUND_UP
 from pathlib import Path
 from typing import AsyncIterator, Dict, Optional, Tuple
 from binance.async_client import AsyncClient
@@ -35,16 +36,29 @@ class BinanceExchange:
         self._socket_manager: Optional[BinanceSocketManager] = None
         self.data_source = data_source.lower()
         self._ccxt_feeds: Dict[Tuple[str, str], CCXTKlineDatabase] = {}
+        self._symbol_filters: Dict[str, Dict[str, dict]] = {}
         self._ccxt_options = self._build_ccxt_options(ccxt_options or {})
         if self.testnet:
             self.client.API_URL = "https://testnet.binance.vision/api"
 
     def execute_order(self, request: OrderRequest, bar: BarData) -> OrderResult:
+        quantity = self._prepare_quantity(
+            symbol=request.symbol,
+            quantity=request.quantity,
+            price=bar.close,
+            order_type=request.order_type,
+        )
+
+        if quantity is None:
+            raise RuntimeError(
+                "Unable to submit order because the calculated quantity does not satisfy Binance trading filters."
+            )
+
         params = {
             "symbol": request.symbol,
             "side": request.side.value,
             "type": request.order_type,
-            "quantity": self._format_quantity(request.quantity),
+            "quantity": quantity,
             "recvWindow": self.recv_window,
         }
         try:
@@ -179,9 +193,126 @@ class BinanceExchange:
             self._socket_manager = BinanceSocketManager(async_client)
         return self._socket_manager
 
+    def _prepare_quantity(
+        self, symbol: str, quantity: float, price: float, order_type: str
+    ) -> Optional[str]:
+        symbol_upper = symbol.upper()
+        filters = self._get_symbol_filters(symbol_upper)
+
+        qty = Decimal(str(quantity))
+        if qty <= 0:
+            return None
+
+        lot_filter = self._select_lot_filter(filters, order_type)
+        if lot_filter:
+            qty = self._apply_lot_size(qty, lot_filter)
+        if qty <= 0:
+            return None
+
+        notional_filter = self._select_notional_filter(filters, order_type)
+        if notional_filter:
+            qty = self._apply_min_notional(qty, Decimal(str(price)), lot_filter, notional_filter)
+        if qty <= 0:
+            return None
+
+        formatted = self._format_quantity(symbol_upper, qty, lot_filter)
+        return formatted if formatted else None
+
+    def _get_symbol_filters(self, symbol: str) -> Dict[str, dict]:
+        if symbol not in self._symbol_filters:
+            info = self.client.get_symbol_info(symbol)
+            if not info:
+                raise ValueError(f"Symbol {symbol} is not available on Binance.")
+            filters = {f.get("filterType"): f for f in info.get("filters", []) if f.get("filterType")}
+            base_precision = int(info.get("baseAssetPrecision", 8))
+            self._symbol_filters[symbol] = {"filters": filters, "base_precision": base_precision}
+        return self._symbol_filters[symbol]
+
     @staticmethod
-    def _format_quantity(quantity: float) -> str:
-        return f"{quantity:.8f}".rstrip("0").rstrip(".")
+    def _select_lot_filter(filters: Dict[str, dict], order_type: str) -> Optional[dict]:
+        filter_map = filters.get("filters", {})
+        if order_type.upper() == "MARKET" and "MARKET_LOT_SIZE" in filter_map:
+            return filter_map["MARKET_LOT_SIZE"]
+        return filter_map.get("LOT_SIZE")
+
+    @staticmethod
+    def _select_notional_filter(filters: Dict[str, dict], order_type: str) -> Optional[dict]:
+        filter_map = filters.get("filters", {})
+        notional = filter_map.get("MIN_NOTIONAL") or filter_map.get("NOTIONAL")
+        if notional is None:
+            return None
+        if order_type.upper() == "MARKET":
+            if notional.get("applyToMarket", True):
+                return notional
+            return None
+        return notional
+
+    @staticmethod
+    def _apply_lot_size(qty: Decimal, lot_filter: dict) -> Decimal:
+        step = Decimal(str(lot_filter.get("stepSize", "0")))
+        min_qty = Decimal(str(lot_filter.get("minQty", "0")))
+        max_qty = Decimal(str(lot_filter.get("maxQty", "0")))
+
+        if step > 0:
+            quotient = (qty / step).to_integral_value(rounding=ROUND_DOWN)
+            qty = (quotient * step).quantize(step, rounding=ROUND_DOWN)
+
+        if min_qty > 0 and qty < min_qty:
+            if step > 0:
+                qty = BinanceExchange._round_to_step(min_qty, step, ROUND_UP)
+            else:
+                qty = min_qty
+
+        if max_qty > 0 and qty > max_qty:
+            qty = max_qty
+
+        return qty
+
+    @staticmethod
+    def _apply_min_notional(
+        qty: Decimal,
+        price: Decimal,
+        lot_filter: Optional[dict],
+        notional_filter: dict,
+    ) -> Decimal:
+        min_notional_key = "minNotional" if "minNotional" in notional_filter else "notional"
+        if notional_filter.get(min_notional_key) is None:
+            return qty
+
+        min_notional = Decimal(str(notional_filter[min_notional_key]))
+        if min_notional <= 0:
+            return qty
+
+        notional = qty * price
+        if notional >= min_notional:
+            return qty
+
+        required_qty = min_notional / price
+        step = Decimal(str(lot_filter.get("stepSize", "0"))) if lot_filter else Decimal("0")
+        if step > 0:
+            qty = BinanceExchange._round_to_step(required_qty, step, ROUND_UP)
+        else:
+            qty = required_qty
+        return qty
+
+    @staticmethod
+    def _round_to_step(value: Decimal, step: Decimal, rounding) -> Decimal:
+        if step <= 0:
+            return value
+        quotient = (value / step).to_integral_value(rounding=rounding)
+        rounded = (quotient * step).quantize(step, rounding=ROUND_DOWN)
+        return rounded
+
+    def _format_quantity(self, symbol: str, quantity: Decimal, lot_filter: Optional[dict]) -> str:
+        precision = self._symbol_filters.get(symbol, {}).get("base_precision", 8)
+        if lot_filter:
+            step = Decimal(str(lot_filter.get("stepSize", "0")))
+            if step > 0:
+                precision = max(precision, -step.normalize().as_tuple().exponent)
+        formatted = f"{quantity:.{precision}f}"
+        if "." in formatted:
+            formatted = formatted.rstrip("0").rstrip(".")
+        return formatted
 
     @staticmethod
     def _build_ccxt_options(raw: dict) -> CCXTOptions:
