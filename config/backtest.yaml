@@ -1,14 +1,14 @@
 exchange:
   name: backtest
   cash: 2000
-  data_file: data/BTCUSDT_1h.csv
+  data_file: data/ETHUSDT_1h.csv
   timeframe: 1h
 
 strategy:
   module: strategies.martingale
   class: MartingaleStrategy
   params:
-    symbol: BTCUSDT
+    symbol: ETHUSDT
     entry_logic: MACD
     take_profit_percent: 5.0
     take_profit_min_percent: 2.0

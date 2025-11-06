@@ -56,7 +56,7 @@ This repository contains a modular martingale trading framework targeting Binanc
    ```
 
 2. **Prepare data for backtests**  
-   Place historical candles in `data/BTCUSDT_1h.csv` (columns: `datetime,open,high,low,close,volume`).
+   Place historical candles in `data/ETHUSDT_1h.csv` (columns: `datetime,open,high,low,close,volume`).
 
 3. **Run a backtest**
    ```bash

@@ -129,7 +129,7 @@ def run_backtest(config_path: str = "config/backtest.yaml") -> BacktestMetrics:
         raise ValueError(f"CSV must contain columns: {required_cols}")
 
     bars: List[BarData] = []
-    symbol = strategy_cfg["params"].get("symbol", exchange_cfg.get("symbol", "BTCUSDT"))
+    symbol = strategy_cfg["params"].get("symbol", exchange_cfg.get("symbol", "ETHUSDT"))
     for _, row in df.iterrows():
         bars.append(
             BarData(

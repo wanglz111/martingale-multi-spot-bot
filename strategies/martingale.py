@@ -36,7 +36,7 @@ class MartingaleStrategy(BaseStrategy):
         "fixed_position": False,
         "start_position_size": 10.0,
         "max_levels": 4,
-        "symbol": "BTCUSDT",
+        "symbol": "ETHUSDT",
     }
 
     def __init__(self, **params):

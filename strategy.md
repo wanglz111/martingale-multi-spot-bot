@@ -13,7 +13,7 @@ Structure
 Usage
 -----
 1. Create a virtual environment and install requirements: `pip install -r requirements.txt`.
-2. Drop historical bars into `data/BTCUSDT_1h.csv` with columns `datetime,open,high,low,close,volume`.
+2. Drop historical bars into `data/ETHUSDT_1h.csv` with columns `datetime,open,high,low,close,volume`.
 3. Run a backtest: `python run_backtest.py -c config/backtest.yaml`.
 4. Prepare Binance testnet API keys and Telegram credentials, export them as environment variables, then launch: `python run_testnet.py -c config/testnet.yaml`.
 
