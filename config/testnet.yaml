@@ -4,6 +4,12 @@ exchange:
   api_key: ${BINANCE_TEST_KEY}
   api_secret: ${BINANCE_TEST_SECRET}
   recv_window: 5000
+  data_source: ccxt
+  ccxt:
+    exchange: binance
+    limit: 720
+    storage_dir: data/ccxt
+    poll_interval: 60
   symbols:
     - BTCUSDT
     - ETHUSDT
