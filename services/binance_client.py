@@ -199,16 +199,20 @@ class BinanceExchange:
         symbol_upper = symbol.upper()
         filters = self._get_symbol_filters(symbol_upper)
 
-        qty = self._to_decimal(quantity)
+        qty = Decimal(str(quantity))
         if qty <= 0:
             return None
 
-        price_dec = self._to_decimal(price)
         lot_filter = self._select_lot_filter(filters, order_type)
-        notional_filter = self._select_notional_filter(filters, order_type)
+        if lot_filter:
+            qty = self._apply_lot_size(qty, lot_filter)
+        if qty <= 0:
+            return None
 
-        qty = self._enforce_quantity_filters(qty, price_dec, lot_filter, notional_filter)
-        if qty is None or qty <= 0:
+        notional_filter = self._select_notional_filter(filters, order_type)
+        if notional_filter:
+            qty = self._apply_min_notional(qty, Decimal(str(price)), lot_filter, notional_filter)
+        if qty <= 0:
             return None
 
         formatted = self._format_quantity(symbol_upper, qty, lot_filter)
@@ -244,46 +248,52 @@ class BinanceExchange:
         return notional
 
     @staticmethod
-    def _enforce_quantity_filters(
-        self,
+    def _apply_lot_size(qty: Decimal, lot_filter: dict) -> Decimal:
+        step = Decimal(str(lot_filter.get("stepSize", "0")))
+        min_qty = Decimal(str(lot_filter.get("minQty", "0")))
+        max_qty = Decimal(str(lot_filter.get("maxQty", "0")))
+
+        if step > 0:
+            quotient = (qty / step).to_integral_value(rounding=ROUND_DOWN)
+            qty = (quotient * step).quantize(step, rounding=ROUND_DOWN)
+
+        if min_qty > 0 and qty < min_qty:
+            if step > 0:
+                qty = BinanceExchange._round_to_step(min_qty, step, ROUND_UP)
+            else:
+                qty = min_qty
+
+        if max_qty > 0 and qty > max_qty:
+            qty = max_qty
+
+        return qty
+
+    @staticmethod
+    def _apply_min_notional(
         qty: Decimal,
         price: Decimal,
         lot_filter: Optional[dict],
-        notional_filter: Optional[dict],
-    ) -> Optional[Decimal]:
-        step = self._get_filter_decimal(lot_filter, "stepSize") if lot_filter else Decimal("0")
-        min_qty = self._get_filter_decimal(lot_filter, "minQty") if lot_filter else Decimal("0")
-        max_qty = self._get_filter_decimal(lot_filter, "maxQty") if lot_filter else Decimal("0")
+        notional_filter: dict,
+    ) -> Decimal:
+        min_notional_key = "minNotional" if "minNotional" in notional_filter else "notional"
+        if notional_filter.get(min_notional_key) is None:
+            return qty
 
-        min_notional_qty = Decimal("0")
-        if notional_filter:
-            min_notional_value = self._get_notional_requirement(notional_filter)
-            if min_notional_value > 0 and price > 0:
-                min_notional_qty = min_notional_value / price
+        min_notional = Decimal(str(notional_filter[min_notional_key]))
+        if min_notional <= 0:
+            return qty
 
-        target_qty = max(qty, min_qty, min_notional_qty)
+        notional = qty * price
+        if notional >= min_notional:
+            return qty
+
+        required_qty = min_notional / price
+        step = Decimal(str(lot_filter.get("stepSize", "0"))) if lot_filter else Decimal("0")
         if step > 0:
-            target_qty = self._round_to_step(target_qty, step, ROUND_UP)
-
-        if max_qty > 0 and target_qty > max_qty:
-            return None
-
-        # Ensure notional requirement is still satisfied after rounding.
-        if notional_filter:
-            min_notional_value = self._get_notional_requirement(notional_filter)
-            if min_notional_value > 0:
-                target_qty = self._bump_until_notional(target_qty, price, step, min_notional_value, max_qty)
-                if target_qty is None:
-                    return None
-
-        # Final guard to ensure minimum quantity is met.
-        if min_qty > 0 and target_qty < min_qty:
-            adjusted = self._round_to_step(min_qty, step, ROUND_UP) if step > 0 else min_qty
-            if max_qty > 0 and adjusted > max_qty:
-                return None
-            target_qty = adjusted
-
-        return target_qty
+            qty = BinanceExchange._round_to_step(required_qty, step, ROUND_UP)
+        else:
+            qty = required_qty
+        return qty
 
     @staticmethod
     def _round_to_step(value: Decimal, step: Decimal, rounding) -> Decimal:
@@ -293,71 +303,11 @@ class BinanceExchange:
         rounded = (quotient * step).quantize(step, rounding=ROUND_DOWN)
         return rounded
 
-    @staticmethod
-    def _get_filter_decimal(filter_data: dict, key: str) -> Decimal:
-        raw = filter_data.get(key)
-        if raw in (None, ""):
-            return Decimal("0")
-        return Decimal(str(raw))
-
-    @staticmethod
-    def _get_notional_requirement(notional_filter: dict) -> Decimal:
-        key = "minNotional" if "minNotional" in notional_filter else "notional"
-        value = notional_filter.get(key)
-        if value in (None, ""):
-            return Decimal("0")
-        return Decimal(str(value))
-
-    @staticmethod
-    def _bump_until_notional(
-        qty: Decimal,
-        price: Decimal,
-        step: Decimal,
-        min_notional: Decimal,
-        max_qty: Decimal,
-    ) -> Optional[Decimal]:
-        if qty * price >= min_notional:
-            return qty
-
-        if price <= 0:
-            return None
-
-        if step <= 0:
-            required = min_notional / price
-            if max_qty > 0 and required > max_qty:
-                return None
-            return required
-
-        current_qty = qty
-        step_value = step
-        increments_needed = ((min_notional - current_qty * price) / (price * step_value)).to_integral_value(
-            rounding=ROUND_UP
-        )
-        current_qty += increments_needed * step_value
-        current_qty = BinanceExchange._round_to_step(current_qty, step_value, ROUND_UP)
-
-        if max_qty > 0 and current_qty > max_qty:
-            return None
-
-        if current_qty * price < min_notional:
-            # Add one more step to ensure requirement due to rounding quirks.
-            current_qty += step_value
-            current_qty = BinanceExchange._round_to_step(current_qty, step_value, ROUND_UP)
-            if max_qty > 0 and current_qty > max_qty:
-                return None
-
-        return current_qty
-
-    @staticmethod
-    def _to_decimal(value: float) -> Decimal:
-        return Decimal(str(value))
-
     def _format_quantity(self, symbol: str, quantity: Decimal, lot_filter: Optional[dict]) -> str:
         precision = self._symbol_filters.get(symbol, {}).get("base_precision", 8)
         if lot_filter:
-            step = self._get_filter_decimal(lot_filter, "stepSize")
+            step = Decimal(str(lot_filter.get("stepSize", "0")))
             if step > 0:
-                quantity = self._round_to_step(quantity, step, ROUND_DOWN)
                 precision = max(precision, -step.normalize().as_tuple().exponent)
         formatted = f"{quantity:.{precision}f}"
         if "." in formatted:
