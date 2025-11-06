@@ -23,18 +23,21 @@ class BacktestMetrics:
     final_equity: float
     return_pct: float
     max_drawdown: float
+    adds_per_trade: List[int]
+    trade_rows: List[dict]
 
 
 class BacktestExchange:
     def __init__(self):
         self._order_id = 0
         self.last_price = None
+        self.fills: List[OrderResult] = []
 
     def execute_order(self, request, bar):
         self._order_id += 1
         price = bar.close
         self.last_price = price
-        return OrderResult(
+        result = OrderResult(
             order_id=f"bt-{self._order_id}",
             side=request.side,
             status="filled",
@@ -43,6 +46,8 @@ class BacktestExchange:
             timestamp=bar.timestamp,
             raw={"source": "backtest"},
         )
+        self.fills.append(result)
+        return result
 
 
 def _compute_drawdown(equity: List[float]) -> float:
@@ -146,15 +151,48 @@ def run_backtest(config_path: str = "config/backtest.yaml") -> BacktestMetrics:
     equity_curve: List[float] = []
     trades = 0
     buy_events: List[dict] = []
+    adds_per_trade: List[int] = []
+    current_adds = 0
+    current_trade: dict | None = None
+    trade_rows: List[dict] = []
 
     for bar in bars:
         pre_avg = portfolio.state.avg_price
         pre_pos = portfolio.state.position
+        fills_before = len(exchange.fills)
         engine.process_bar(bar)
+        new_fills = exchange.fills[fills_before:]
+        for fill in new_fills:
+            price_filled = fill.avg_price if fill.avg_price is not None else bar.close
+            qty = fill.filled_qty
+            if fill.side == OrderSide.BUY:
+                if current_trade is None:
+                    current_trade = {
+                        "signal_time": fill.timestamp,
+                        "entries": [],
+                        "total_cost": 0.0,
+                        "total_proceeds": 0.0,
+                        "final_close_time": None,
+                        "final_profit": None,
+                    }
+                level_index = len(current_trade["entries"])
+                cost = price_filled * qty
+                current_trade["entries"].append(
+                    {"time": fill.timestamp, "level": level_index, "cost": cost}
+                )
+                current_trade["total_cost"] += cost
+                if level_index == 0:
+                    current_trade["signal_time"] = fill.timestamp
+            elif fill.side == OrderSide.SELL:
+                proceeds = price_filled * qty
+                if current_trade is not None:
+                    current_trade["total_proceeds"] += proceeds
         snapshot = portfolio.snapshot(bar.close)
         equity_curve.append(snapshot["equity"])
         if pre_pos > 0 and portfolio.state.position == 0 and pre_avg > 0:
             trades += 1
+            adds_per_trade.append(current_adds)
+            current_adds = 0
         if portfolio.state.position > pre_pos:
             reason = "BUY"
             signal = getattr(strategy, "last_signal", None)
@@ -164,12 +202,34 @@ def run_backtest(config_path: str = "config/backtest.yaml") -> BacktestMetrics:
                 elif signal.action == SignalAction.ADD:
                     level = signal.info.get("level")
                     reason = f"Add L{level}" if level is not None else "ADD"
+                    current_adds += 1
                 else:
                     reason = signal.info.get("reason", signal.action.name)
             elif signal is not None:
                 reason = signal.action.name
             price = exchange.last_price if exchange.last_price is not None else bar.close
             buy_events.append({"timestamp": bar.timestamp, "price": price, "reason": reason})
+            if pre_pos == 0:
+                current_adds = 0
+
+        if pre_pos > 0 and portfolio.state.position == 0 and current_trade is not None:
+            current_trade["final_close_time"] = bar.timestamp
+            current_trade["final_profit"] = current_trade["total_proceeds"] - current_trade["total_cost"]
+            signal_time = current_trade["signal_time"]
+            close_time = current_trade["final_close_time"]
+            profit_value = current_trade["final_profit"]
+            for entry in current_trade["entries"]:
+                trade_rows.append(
+                    {
+                        "signal_time": signal_time,
+                        "add_time": entry["time"],
+                        "add_number": entry["level"],
+                        "investment": entry["cost"],
+                        "close_time": close_time,
+                        "profit": profit_value,
+                    }
+                )
+            current_trade = None
 
     final_equity = equity_curve[-1] if equity_curve else initial_cash
     return_pct = (final_equity / initial_cash - 1) * 100 if initial_cash > 0 else 0.0
@@ -182,7 +242,42 @@ def run_backtest(config_path: str = "config/backtest.yaml") -> BacktestMetrics:
     print(f"Return: {return_pct:.2f}%")
     print(f"Max drawdown: {max_drawdown:.2f}%")
     print(f"Trades closed: {trades}")
+    if adds_per_trade:
+        adds_summary = ", ".join(str(count) for count in adds_per_trade)
+        avg_adds = sum(adds_per_trade) / len(adds_per_trade)
+        print(f"Adds per trade: [{adds_summary}] (avg={avg_adds:.2f})")
     print(f"Equity curve saved: {output_path}")
+
+    if current_trade is not None:
+        signal_time = current_trade["signal_time"]
+        for entry in current_trade["entries"]:
+            trade_rows.append(
+                {
+                    "signal_time": signal_time,
+                    "add_time": entry["time"],
+                    "add_number": entry["level"],
+                    "investment": entry["cost"],
+                    "close_time": current_trade.get("final_close_time"),
+                    "profit": current_trade.get("final_profit"),
+                }
+            )
+
+    if trade_rows:
+        def _fmt_time(ts: datetime | None) -> str:
+            return ts.strftime("%Y-%m-%d %H:%M:%S") if ts else ""
+
+        table_data = pd.DataFrame(
+            {
+                "Signal Time": [_fmt_time(row["signal_time"]) for row in trade_rows],
+                "Add Time": [_fmt_time(row["add_time"]) for row in trade_rows],
+                "Add #": [row["add_number"] for row in trade_rows],
+                "Investment": [row["investment"] for row in trade_rows],
+                "Close Time": [_fmt_time(row["close_time"]) for row in trade_rows],
+                "Profit": [row["profit"] if row["profit"] is not None else "" for row in trade_rows],
+            }
+        )
+        print("\nTrade Breakdown:")
+        print(table_data.to_string(index=False))
 
     return BacktestMetrics(
         equity_curve=equity_curve,
@@ -191,6 +286,8 @@ def run_backtest(config_path: str = "config/backtest.yaml") -> BacktestMetrics:
         final_equity=final_equity,
         return_pct=return_pct,
         max_drawdown=max_drawdown,
+        adds_per_trade=adds_per_trade,
+        trade_rows=trade_rows,
     )
 
 

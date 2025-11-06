@@ -1,7 +1,7 @@
 exchange:
   name: backtest
-  cash: 20000
-  data_file: data/ETHUSDT_1h.csv
+  cash: 2000
+  data_file: data/BTCUSDT_1h.csv
   timeframe: 1h
 
 strategy:
@@ -11,14 +11,14 @@ strategy:
     symbol: BTCUSDT
     entry_logic: MACD
     take_profit_percent: 5.0
-    martingale_trigger: 10.0
-    martingale_mult: 2.5
+    martingale_trigger: 7.0
+    martingale_mult: 2.1
     base_position_pct: 0.05
     fixed_position: false
     max_levels: 10
 
 risk:
-  max_notional: 20000
+  max_notional: 2000
   cooldown_minutes: 60
 
 notifications:
