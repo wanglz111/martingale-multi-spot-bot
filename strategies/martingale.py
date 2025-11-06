@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import logging
+import math
 from collections import deque
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Deque, Dict, Optional, Tuple
 
 import pandas as pd
@@ -16,6 +18,7 @@ class PositionState:
     size: float = 0.0
     avg_price: float = 0.0
     levels: int = 0
+    entry_timestamp: Optional[datetime] = None
 
 
 logger = logging.getLogger(__name__)
@@ -25,6 +28,8 @@ class MartingaleStrategy(BaseStrategy):
     DEFAULTS: Dict = {
         "entry_logic": "MACD",
         "take_profit_percent": 5.0,
+        "take_profit_min_percent": 2.0,
+        "take_profit_decay_hours": 240.0,
         "martingale_trigger": 10.0,
         "martingale_mult": 2.5,
         "base_position_pct": 0.05,
@@ -230,8 +235,26 @@ class MartingaleStrategy(BaseStrategy):
             return False
         return True
 
-    def _should_take_profit(self, price: float) -> bool:
-        take_profit = self.params["take_profit_percent"]
+    def _current_take_profit_threshold(self, current_time: datetime) -> float:
+        take_profit = float(self.params["take_profit_percent"])
+        entry_time = self.position.entry_timestamp
+        if entry_time is None or current_time <= entry_time:
+            return take_profit
+
+        tau = float(self.params.get("take_profit_decay_hours", 0) or 0)
+        tp_min = float(self.params.get("take_profit_min_percent", take_profit))
+        if tau <= 0:
+            return max(tp_min, take_profit)
+
+        elapsed_hours = (current_time - entry_time).total_seconds() / 3600
+        if elapsed_hours <= 0:
+            return take_profit
+
+        decayed = take_profit * math.exp(-elapsed_hours / tau)
+        return max(tp_min, decayed)
+
+    def _should_take_profit(self, price: float, current_time: datetime) -> bool:
+        take_profit = self._current_take_profit_threshold(current_time)
         if self.position.size <= 0 or self.position.avg_price <= 0:
             return False
         profit_pct = (price - self.position.avg_price) / self.position.avg_price * 100
@@ -268,7 +291,7 @@ class MartingaleStrategy(BaseStrategy):
             else:
                 signal = TradeSignal(action=SignalAction.HOLD)
         else:
-            if self._should_take_profit(price):
+            if self._should_take_profit(price, bar.timestamp):
                 signal = TradeSignal(action=SignalAction.EXIT, info={"reason": "take_profit"})
             elif self._should_add_position(price):
                 signal = TradeSignal(action=SignalAction.ADD, info={"level": self.position.levels + 1})
@@ -289,11 +312,20 @@ class MartingaleStrategy(BaseStrategy):
 
     def on_order_fill(self, order: OrderResult) -> None:
         if order.side == OrderSide.BUY:
-            total_cost = self.position.avg_price * self.position.size + (order.avg_price or 0) * order.filled_qty
-            new_size = self.position.size + order.filled_qty
+            previous_size = self.position.size
+            total_cost = self.position.avg_price * previous_size + (order.avg_price or 0) * order.filled_qty
+            new_size = previous_size + order.filled_qty
             avg_price = total_cost / new_size if new_size > 0 else 0
             self.position.size = new_size
             self.position.avg_price = avg_price
             self.position.levels += 1
+            if new_size > 0:
+                if self.position.entry_timestamp is None or previous_size <= 0:
+                    entry_timestamp = order.timestamp
+                else:
+                    weight_new = order.filled_qty / new_size
+                    prev_entry = self.position.entry_timestamp
+                    entry_timestamp = prev_entry + (order.timestamp - prev_entry) * weight_new
+                self.position.entry_timestamp = entry_timestamp
         elif order.side == OrderSide.SELL:
             self.position = PositionState()

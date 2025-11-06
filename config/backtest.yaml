@@ -11,6 +11,8 @@ strategy:
     symbol: BTCUSDT
     entry_logic: MACD
     take_profit_percent: 5.0
+    take_profit_min_percent: 2.0
+    take_profit_decay_hours: 240
     martingale_trigger: 10.0
     martingale_mult: 2.45
     base_position_pct: 0.05
