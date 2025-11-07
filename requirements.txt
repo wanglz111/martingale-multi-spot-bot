@@ -6,3 +6,4 @@ pandas>=2.0
 aiohttp>=3.9
 requests>=2.31
 ccxt>=4.1
+boto3>=1.34

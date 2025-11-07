@@ -13,8 +13,11 @@ case "${MODE}" in
   testnet)
     exec python run_testnet.py -c "${CONFIG_FILE}"
     ;;
+  live)
+    exec python run_live.py -c "${CONFIG_FILE}"
+    ;;
   *)
-    echo "Unsupported MODE: ${MODE}. Use 'backtest' or 'testnet'."
+    echo "Unsupported MODE: ${MODE}. Use 'backtest', 'testnet', or 'live'."
     exit 1
     ;;
 esac

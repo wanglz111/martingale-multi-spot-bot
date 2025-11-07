@@ -15,6 +15,7 @@ class PortfolioState:
     avg_price: float = 0.0
     base_unit: float = 0.0
     levels: int = 0  # number of filled martingale levels
+    first_entry_time: Optional[datetime] = None
     last_entry_time: Optional[datetime] = None
     last_exit_time: Optional[datetime] = None
 
@@ -116,14 +117,16 @@ class PortfolioManager:
             cost = execution_price * order.filled_qty
             self.state.cash -= cost
             new_position = self.state.position + order.filled_qty
+            opening_trade = self.state.levels == 0
             if new_position > 0:
                 weighted_cost = self.state.avg_price * self.state.position + execution_price * order.filled_qty
                 self.state.avg_price = weighted_cost / new_position
             self.state.position = new_position
             self.state.last_entry_time = timestamp
-            if self.state.levels == 0:
+            if opening_trade:
                 self.state.base_unit = order.filled_qty
                 self.state.levels = 1
+                self.state.first_entry_time = timestamp
             else:
                 self.state.levels += 1
         elif order.side == OrderSide.SELL:
@@ -143,6 +146,7 @@ class PortfolioManager:
                 self.state.avg_price = 0.0
                 self.state.base_unit = 0.0
                 self.state.levels = 0
+                self.state.first_entry_time = None
                 self.state.last_exit_time = timestamp
 
     def snapshot(self, price: float) -> Dict:
@@ -152,4 +156,62 @@ class PortfolioManager:
             "avg_price": self.state.avg_price,
             "equity": self.state.equity(price),
             "levels": self.state.levels,
+            "dca_count": max(self.state.levels - 1, 0),
+            "base_unit": self.state.base_unit,
+            "first_entry_time": self._format_time(self.state.first_entry_time),
+            "last_entry_time": self._format_time(self.state.last_entry_time),
+            "last_exit_time": self._format_time(self.state.last_exit_time),
         }
+
+    def restore_snapshot(self, snapshot: Dict) -> None:
+        cash = snapshot.get("cash")
+        if cash is not None:
+            try:
+                self.state.cash = float(cash)
+            except (TypeError, ValueError):
+                pass
+
+        position = snapshot.get("position")
+        if position is not None:
+            try:
+                self.state.position = float(position)
+            except (TypeError, ValueError):
+                pass
+
+        avg_price = snapshot.get("avg_price")
+        if avg_price is not None:
+            try:
+                self.state.avg_price = float(avg_price)
+            except (TypeError, ValueError):
+                pass
+
+        base_unit = snapshot.get("base_unit")
+        if base_unit is not None:
+            try:
+                self.state.base_unit = float(base_unit)
+            except (TypeError, ValueError):
+                pass
+
+        levels = snapshot.get("levels")
+        if levels is not None:
+            try:
+                self.state.levels = int(levels)
+            except (TypeError, ValueError):
+                pass
+
+        self.state.first_entry_time = self._parse_time(snapshot.get("first_entry_time"))
+        self.state.last_entry_time = self._parse_time(snapshot.get("last_entry_time"))
+        self.state.last_exit_time = self._parse_time(snapshot.get("last_exit_time"))
+
+    @staticmethod
+    def _format_time(value: Optional[datetime]) -> Optional[str]:
+        return value.isoformat() if value else None
+
+    @staticmethod
+    def _parse_time(value: Optional[str]) -> Optional[datetime]:
+        if not value:
+            return None
+        try:
+            return datetime.fromisoformat(value)
+        except ValueError:
+            return None

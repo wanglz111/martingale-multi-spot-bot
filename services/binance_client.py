@@ -6,6 +6,8 @@ from datetime import datetime
 from decimal import Decimal, ROUND_DOWN, ROUND_UP
 from pathlib import Path
 from typing import AsyncIterator, Dict, Optional, Tuple
+
+import time
 from binance.async_client import AsyncClient
 from binance.client import Client
 from binance.exceptions import BinanceAPIException
@@ -41,7 +43,14 @@ class BinanceExchange:
         if self.testnet:
             self.client.API_URL = "https://testnet.binance.vision/api"
 
-    def execute_order(self, request: OrderRequest, bar: BarData) -> OrderResult:
+    def execute_order(
+        self,
+        request: OrderRequest,
+        bar: BarData,
+        *,
+        confirm_execution: bool = True,
+        confirmation_retries: int = 3,
+    ) -> OrderResult:
         quantity = self._prepare_quantity(
             symbol=request.symbol,
             quantity=request.quantity,
@@ -77,11 +86,25 @@ class BinanceExchange:
         else:
             avg_price = bar.close
 
+        order_id = str(response.get("orderId"))
+        status = response.get("status", "FILLED")
+        filled_qty = float(response.get("executedQty", request.quantity))
+        if confirm_execution and order_id:
+            verified = self._confirm_order(
+                symbol=request.symbol,
+                order_id=order_id,
+                max_attempts=max(confirmation_retries, 1),
+            )
+            status = verified.get("status", status)
+            filled_qty = float(verified.get("executedQty", filled_qty))
+            if filled_qty <= 0:
+                filled_qty = float(response.get("origQty", request.quantity))
+
         return OrderResult(
-            order_id=str(response.get("orderId")),
+            order_id=order_id,
             side=request.side,
-            status=response.get("status", "FILLED"),
-            filled_qty=float(response.get("executedQty", request.quantity)),
+            status=status,
+            filled_qty=filled_qty,
             avg_price=avg_price,
             timestamp=datetime.utcnow(),
             raw=response,
@@ -127,6 +150,21 @@ class BinanceExchange:
                 last_timestamp = bar.timestamp
                 yield bar
 
+    async def stream_symbol_ticker(self, symbol: str) -> AsyncIterator[float]:
+        async_client = await self._get_async_client()
+        manager = self._get_socket_manager(async_client)
+        socket = manager.symbol_ticker_socket(symbol.lower())
+        async with socket as stream:
+            while True:
+                message = await stream.recv()
+                if not isinstance(message, dict):
+                    continue
+                data = message.get("data") or message
+                price = data.get("c") or data.get("lastPrice")
+                if price is None:
+                    continue
+                yield float(price)
+
     def verify_account_permissions(self) -> None:
         try:
             account = self.client.get_account(recvWindow=self.recv_window)
@@ -155,6 +193,24 @@ class BinanceExchange:
         status = info.get("status")
         if status != "TRADING":
             raise PermissionError(f"Symbol {symbol} is not tradable on Binance (status={status}).")
+
+    def fetch_symbol_components(self, symbol: str) -> Tuple[str, str]:
+        info = self.client.get_symbol_info(symbol.upper())
+        if not info:
+            raise ValueError(f"Symbol {symbol} is not available on Binance.")
+        return info.get("baseAsset"), info.get("quoteAsset")
+
+    def get_account_balances(self, base_asset: str, quote_asset: str) -> Dict[str, dict]:
+        account = self.client.get_account(recvWindow=self.recv_window)
+        balances = account.get("balances", [])
+        lookup = {item.get("asset"): item for item in balances}
+        return {
+            "base": lookup.get(base_asset.upper(), {"free": 0, "locked": 0}),
+            "quote": lookup.get(quote_asset.upper(), {"free": 0, "locked": 0}),
+        }
+
+    def get_order(self, symbol: str, order_id: str) -> Dict:
+        return self.client.get_order(symbol=symbol.upper(), orderId=order_id)
 
     def _get_ccxt_feed(self, symbol: str, interval: str) -> CCXTKlineDatabase:
         key = (symbol, interval)
@@ -331,6 +387,19 @@ class BinanceExchange:
         if "enable_rate_limit" in raw:
             options.enable_rate_limit = bool(raw["enable_rate_limit"])
         return options
+
+    def _confirm_order(self, symbol: str, order_id: str, max_attempts: int) -> Dict:
+        attempts = min(max_attempts, 5)
+        last_exc: Optional[Exception] = None
+        for _ in range(attempts):
+            try:
+                return self.get_order(symbol, order_id)
+            except BinanceAPIException as exc:
+                last_exc = exc
+                time.sleep(0.5)
+        if last_exc:
+            raise last_exc
+        return {}
 
 
 async def run_stream(exchange: BinanceExchange, symbol: str, interval: str = "1h"):
