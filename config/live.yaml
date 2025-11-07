@@ -1,0 +1,41 @@
+exchange:
+  api_key: ${BINANCE_API_KEY}
+  api_secret: ${BINANCE_API_SECRET}
+  symbols:
+    - BTCUSDT
+  interval: 1h
+  cash: 10000
+  data_source: binance
+  enable_ticker_stream: true
+  reconnect_interval: 5
+  recv_window: 5000
+
+strategy:
+  name: martingale
+  params:
+    symbol: BTCUSDT
+    entry_logic: MACD
+    take_profit_percent: 3
+    martingale_trigger: 5
+    martingale_mult: 2
+    base_position_pct: 0.05
+    max_levels: 4
+
+risk:
+  max_notional: 15000
+  cooldown_minutes: 10
+
+account_sync:
+  interval: 30
+  tolerance: 0.0001
+
+notifications:
+  type: stdout
+
+cloud_storage:
+  account_id: ${R2_ACCOUNT_ID}
+  access_key_id: ${R2_ACCESS_KEY_ID}
+  secret_access_key: ${R2_SECRET_ACCESS_KEY}
+  bucket: ${R2_BUCKET}
+  parameters_key: configs/martingale-live.json
+  state_key_template: states/{symbol}.json
